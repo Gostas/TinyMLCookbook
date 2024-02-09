@@ -23,12 +23,13 @@
 //#include "ConditionVariable.h"
 //#include "Kernel.h"
 
+// for s, ms, etc.
 using namespace std::chrono_literals;
 
-// for BLE UUIDs
-// https://www.bluetooth.com/specifications/assigned-numbers/
-// Celsius temperature (degree Celsius) = 0x272F
-// percentage = 0x27AD
+/* for BLE UUIDs
+ https://www.bluetooth.com/specifications/assigned-numbers/
+ Celsius temperature (degree Celsius) = 0x272F
+ percentage = 0x27AD */
 
 // Bluetooth® Low Energy weather service
 BLEService weatherService("181A");
@@ -37,17 +38,18 @@ BLEService weatherService("181A");
 BLEIntCharacteristic tempChar("2A6E",  // standard 16-bit characteristic UUID
     BLERead | BLENotify); // remote clients will be able to get notifications if this characteristic changes
 BLEIntCharacteristic humChar("2A6F", BLERead | BLENotify);
-BLEIntCharacteristic snowProbChar("2A78", BLERead | BLENotify);
+BLEIntCharacteristic snowProbChar("2A78", BLERead | BLENotify); // (Displayed as Rainfall)
 
-long long previousMillis;  // last time the sensors values were checked, in ms
+unsigned long long previousMillis;  // last time data was transmitted
 
 constexpr int NUM_HOURS = 3;  // period of sensing and prediction
 constexpr int num_reads = 3;  // number of times to repeat sensor reading
 int8_t t_vals[NUM_HOURS], h_vals[NUM_HOURS]; // quantized values
-int cur_idx = 0;
-float oldPred=-1;
-float pred_f;
-int t_preds[2], h_preds[2]; // keep current and previous prediction
+// store current readings and readings previously transmitted
+float cur_t, cur_h, pred_f, 
+  old_t=-273, old_h=-1, old_pred=-1;
+
+int cur_idx;
 
 // Quantization parameters
 float tflu_i_scale = 1.0f;
@@ -55,7 +57,7 @@ float tflu_o_scale = 1.0f;
 int32_t tflu_i_zero_point = 0;
 int32_t tflu_o_zero_point = 0;
 
-// Normalization parameeters for temp and humidity
+// Normalization parameeters for temperature and humidity
 constexpr float t_mean = 4.18374f;
 constexpr float h_mean = 77.88801f;
 constexpr float t_std = 9.80673f;
@@ -84,6 +86,16 @@ TfLiteStatus RegisterOps(MlSnowOpResolver& op_resolver) {
 
 void readPredictSend();
 
+inline void scale_and_quantize(float &t, float &h){
+  // scale with Z-score
+  t = (t - t_mean)/t_std;
+  h = (h - h_mean)/h_std;
+
+  // quantize
+  t = (t / tflu_i_scale) + (float)tflu_i_zero_point;
+  h = (h / tflu_i_scale) + (float)tflu_i_zero_point;
+}
+
 events::EventQueue queue;
 rtos::Thread eventThread;
 rtos::Mutex mutex;
@@ -92,13 +104,11 @@ rtos::Mutex mutex;
 void setup() {
   /*
   TODO
-    1. Transmit the correct values
-    2. Transmit only when value has changed
     3. Investigate freeze when no connection
-    4. Read values 3 times in setup
     5. Add pressure measurements
     6. Add units to characteristics
-    7. Create notes
+    7. consider case when previousMillis > LL max and resets to 0
+    8. Create notes
   */
   tflite::InitializeTarget();   // Initializes serial communication
 
@@ -179,22 +189,34 @@ void setup() {
   const auto *i_quantization = reinterpret_cast<TfLiteAffineQuantization*>(tflu_i_tensor->quantization.params);
   const auto *o_quantization = reinterpret_cast<TfLiteAffineQuantization*>(tflu_o_tensor->quantization.params);
 
-  // Since both input and output tensors adopt a per-tensor quantization,
-  // each array stores a single value.
+  /* Since both input and output tensors adopt a per-tensor quantization,
+   each array stores a single value. */
   tflu_i_scale = i_quantization->scale->data[0];
   tflu_i_zero_point = i_quantization->zero_point->data[0];
 
   tflu_o_scale = o_quantization->scale->data[0];
   tflu_o_zero_point = o_quantization->zero_point->data[0];
 
+  // Populate temp and hum with initial values
+  for (int i = 0; i < NUM_HOURS; ++i){
+    float t, h;
+    t = HTS.readTemperature();
+    h = HTS.readHumidity();
+    cur_t = t;
+    cur_h = h;
+    scale_and_quantize(t, h);
+    t_vals[NUM_HOURS - i] = t;
+    h_vals[NUM_HOURS - i] = h;
+    delay(1000);  
+  }
 
   // if(osThreadSetPriority(rtos::ThisThread::get_id(), osPriorityRealtime) != osOK){
   //   Serial.println("Error setting the priority of the main thread");
   //   while(1);
   // }
 
-  // setup watchdog to reset the system if there has been no
-  // connection for 20 connection periods
+  /* setup watchdog timer to reset the system if there has been no connection
+   for 20 connection periods */
   mbed::Watchdog &watchdog = mbed::Watchdog::get_instance();
   watchdog.start(20*10*1000);
 
@@ -227,18 +249,24 @@ void loop() {
       long currentMillis = millis();
       // if 20s have passed, check the sensor readings:
       if (currentMillis - previousMillis >= 20000) {
+        // Critical section start
         mutex.lock();
-
         Serial.println("Transmitting data...");
-        //dequantize and scale back values
-        const int t = int((t_vals[cur_idx] - tflu_o_zero_point) * tflu_o_scale * t_std + t_mean);
-        const int h = int((h_vals[cur_idx] - tflu_o_zero_point) * tflu_o_scale * h_std + h_mean);
-        tempChar.writeValue(t);
-        humChar.writeValue(h);
-        snowProbChar.writeValue(int(100*pred_f));
-
+        if(old_t != cur_t){
+          tempChar.writeValue((int)cur_t);
+          old_t = cur_t;
+        }
+        if(old_h != cur_h){
+          humChar.writeValue((int)cur_h);
+          old_h = cur_h;
+        }        
+        if(pred_f != old_pred){
+          snowProbChar.writeValue(int(100*pred_f));
+          old_pred = pred_f;
+        }
         previousMillis = currentMillis;
         mutex.unlock();
+        // critical section end
       }
     }
     Serial.println("Disconnected from central");
@@ -246,13 +274,14 @@ void loop() {
   }
 }
 
+
 void readPredictSend(){
-  int8_t pred_int8;
   const int idx1 = (cur_idx - 1 + NUM_HOURS) % NUM_HOURS;
   const int idx2 = (cur_idx - 2 + NUM_HOURS) % NUM_HOURS;
 
-  float t = 0.0f;
-  float h = 0.0f;
+  int8_t pred_int8;
+  float t_quant, h_quant;
+  float t = 0.0f, h = 0.0f;
 
   for(int i = 0; i < num_reads; ++i){
     t += HTS.readTemperature();
@@ -263,44 +292,39 @@ void readPredictSend(){
   t /= (float)num_reads;
   h /= (float)num_reads;
 
-  Serial.print("Temperature = ");
-  Serial.println(t);
-  Serial.print("Humidity = ");
-  Serial.println(h);
-  
-  // scale with Z-score
-  t = (t - t_mean)/t_std;
-  h = (h - h_mean)/h_std;
-
-  // quantize
-  t = (t / tflu_i_scale) + (float)tflu_i_zero_point;
-  h = (h / tflu_i_scale) + (float)tflu_i_zero_point;
+  t_quant = t;
+  h_quant = h;
+  scale_and_quantize(t_quant, h_quant);
+  t_vals[cur_idx] = t_quant;
+  h_vals[cur_idx] = h_quant;
 
   // input observed data to model
   tflu_i_tensor->data.int8[0] = t_vals[idx2];
   tflu_i_tensor->data.int8[1] = t_vals[idx1];
-  tflu_i_tensor->data.int8[2] = t;
+  tflu_i_tensor->data.int8[2] = t_vals[cur_idx];
   tflu_i_tensor->data.int8[3] = h_vals[idx2];
   tflu_i_tensor->data.int8[4] = h_vals[idx1];
-  tflu_i_tensor->data.int8[5] = h;
-
+  tflu_i_tensor->data.int8[5] = h_vals[cur_idx];
+  // Run inference
   tflu_interpreter->Invoke();
   // get prediction
   pred_int8 = tflu_o_tensor->data.int8[0];
 
+  // Critical section start
   mutex.lock();
-
-  t_vals[cur_idx] = t;
-  h_vals[cur_idx] = h;
   cur_idx = (cur_idx + 1) % NUM_HOURS;
-  oldPred = pred_f;
+  cur_t = t;
+  cur_h = h;
   // dequantize
   pred_f = (pred_int8 - tflu_o_zero_point) * tflu_o_scale;
-
+  Serial.print("Temperature = ");
+  Serial.println(t);
+  Serial.print("Humidity = ");
+  Serial.println(h);
   Serial.print(100*pred_f);
   Serial.println("% chance it will snow");
-
   mutex.unlock();
+  // Critical section end
 }
 
 // void blePeripheralConnectHandler(BLEDevice central) {
