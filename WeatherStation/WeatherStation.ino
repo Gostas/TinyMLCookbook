@@ -1,4 +1,5 @@
 #include <Arduino_HTS221.h>
+#include <Arduino_LPS22HB.h>
 #include <TensorFlowLite.h>
 #include <ArduinoBLE.h>
 #include "mbed.h"
@@ -38,7 +39,8 @@ BLEService weatherService("181A");
 BLEIntCharacteristic tempChar("2A6E",  // standard 16-bit characteristic UUID
     BLERead | BLENotify); // remote clients will be able to get notifications if this characteristic changes
 BLEIntCharacteristic humChar("2A6F", BLERead | BLENotify);
-BLEIntCharacteristic snowProbChar("2A78", BLERead | BLENotify); // (Displayed as Rainfall)
+BLEIntCharacteristic pressureChar("2AA3", BLERead | BLENotify);
+BLEIntCharacteristic snowProbChar("2A78", BLERead | BLENotify); // Displayed as Rainfall
 
 unsigned long long previousMillis;  // last time data was transmitted
 
@@ -46,8 +48,8 @@ constexpr int NUM_HOURS = 3;  // period of sensing and prediction
 constexpr int num_reads = 3;  // number of times to repeat sensor reading
 int8_t t_vals[NUM_HOURS], h_vals[NUM_HOURS]; // quantized values
 // store current readings and readings previously transmitted
-float cur_t, cur_h, pred_f, 
-  old_t=-273, old_h=-1, old_pred=-1;
+float cur_t, cur_h, cur_p, pred_f;
+float old_t = -273, old_h = -1, old_p = -1, old_pred = -1;
 
 int cur_idx;
 
@@ -84,7 +86,7 @@ TfLiteStatus RegisterOps(MlSnowOpResolver& op_resolver) {
 }
 }  // namespace
 
-void readPredictSend();
+void readPredict();
 
 inline void scale_and_quantize(float &t, float &h){
   // scale with Z-score
@@ -104,18 +106,19 @@ rtos::Mutex mutex;
 void setup() {
   /*
   TODO
-    3. Investigate freeze when no connection
-    5. Add pressure measurements
-    6. Add units to characteristics
-    7. consider case when previousMillis > LL max and resets to 0
-    8. Create notes
+    1. Create README
+    2. Update NN model to use barometric pressure
   */
   tflite::InitializeTarget();   // Initializes serial communication
 
-  // init sensor
   if(!HTS.begin()){
     Serial.println("Failed initializations of HTS221!");
     while(1);
+  }
+
+  if (!BARO.begin()) {
+    Serial.println("Failed to initialize pressure sensor!");
+    while (1);
   }
 
   if (!BLE.begin()) {
@@ -125,15 +128,16 @@ void setup() {
 
   BLE.setLocalName("WeatherStation");
 
-  // BLEDescriptor celsiusUnit("272F", "°C");
-  // BLEDescriptor percentUnit("27AD", "%");
+  BLEDescriptor celsiusUnit("272F", "°C");
+  BLEDescriptor percentUnit("27AD", "%");
 
-  // tempChar.addDescriptor(celsiusUnit);
-  // humChar.addDescriptor(percentUnit);
-  // snowProbChar.addDescriptor(percentUnit);
+  tempChar.addDescriptor(celsiusUnit);
+  humChar.addDescriptor(percentUnit);
+  snowProbChar.addDescriptor(percentUnit);
 
   weatherService.addCharacteristic(tempChar);
   weatherService.addCharacteristic(humChar);
+  weatherService.addCharacteristic(pressureChar);
   weatherService.addCharacteristic(snowProbChar);
 
   BLE.setAdvertisedService(weatherService);
@@ -143,10 +147,6 @@ void setup() {
   // set callbacks
   //BLE.setEventHandler(BLEConnected, blePeripheralConnectHandler);
   //BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
-
-  tempChar.writeValue(-273);
-  humChar.writeValue(-1);
-  snowProbChar.writeValue(-1);
 
   // load the model
   tflu_model = tflite::GetModel(snow_model_q_aware_tflite);
@@ -199,11 +199,13 @@ void setup() {
 
   // Populate temp and hum with initial values
   for (int i = 0; i < NUM_HOURS; ++i){
-    float t, h;
-    t = HTS.readTemperature();
+    float t, h, p;
+    t = HTS.readTemperature()-2;
     h = HTS.readHumidity();
+    p = BARO.readPressure();
     cur_t = t;
     cur_h = h;
+    cur_p = p;
     scale_and_quantize(t, h);
     t_vals[NUM_HOURS - i] = t;
     h_vals[NUM_HOURS - i] = h;
@@ -215,10 +217,9 @@ void setup() {
   //   while(1);
   // }
 
-  /* setup watchdog timer to reset the system if there has been no connection
-   for 20 connection periods */
+  // setup watchdog timer to reset the system if it gets stuck
   mbed::Watchdog &watchdog = mbed::Watchdog::get_instance();
-  watchdog.start(20*10*1000);
+  watchdog.start(2*60*1000);
 
   BLE.advertise();
   Serial.println("BLE WeatherStation advertising");
@@ -227,8 +228,8 @@ void setup() {
   eventThread.start(callback(&queue, &events::EventQueue::dispatch_forever));
   //eventThread.set_priority(osPriorityBelowNormal6);
 
-  // generate event every 10s
-  queue.call_every(10s, readPredictSend);
+  // generate event every 60s
+  queue.call_every(60s, readPredict);
 
   //Kernel::attach_idle_hook(loop);
 }
@@ -236,31 +237,39 @@ void setup() {
 
 void loop() {
   BLEDevice central = BLE.central();
+  bool firstTime = true;
+  //refresh the watchdog timer
+  mbed::Watchdog::get_instance().kick();
 
   // if a central is connected to the peripheral:
   if (central) {
+    long currentMillis = millis();
+    previousMillis = millis();
     Serial.println("Connected to central");
     // print the central's BT address:
     //Serial.println(central.address());
 
     while (central.connected()) {
-      //refresh the watchdog timer
       mbed::Watchdog::get_instance().kick();
-      long currentMillis = millis();
-      // if 20s have passed, check the sensor readings:
-      if (currentMillis - previousMillis >= 20000) {
+      currentMillis = millis();
+      // check the for new sensor readings every 20s
+      if (currentMillis - previousMillis >= 20000 | firstTime) {
         // Critical section start
         mutex.lock();
         Serial.println("Transmitting data...");
-        if(old_t != cur_t){
+        if(old_t != cur_t | firstTime){
           tempChar.writeValue((int)cur_t);
           old_t = cur_t;
         }
-        if(old_h != cur_h){
+        if(old_h != cur_h | firstTime){
           humChar.writeValue((int)cur_h);
           old_h = cur_h;
+        }
+        if(old_p != cur_p | firstTime){
+          pressureChar.writeValue((int)cur_p);
+          old_p = cur_p;
         }        
-        if(pred_f != old_pred){
+        if(pred_f != old_pred | firstTime){
           snowProbChar.writeValue(int(100*pred_f));
           old_pred = pred_f;
         }
@@ -268,6 +277,7 @@ void loop() {
         mutex.unlock();
         // critical section end
       }
+      firstTime = false;
     }
     Serial.println("Disconnected from central");
     //Serial.println(central.address());
@@ -275,25 +285,27 @@ void loop() {
 }
 
 
-void readPredictSend(){
+void readPredict(){
   const int idx1 = (cur_idx - 1 + NUM_HOURS) % NUM_HOURS;
   const int idx2 = (cur_idx - 2 + NUM_HOURS) % NUM_HOURS;
 
   int8_t pred_int8;
   float t_quant, h_quant;
-  float t = 0.0f, h = 0.0f;
+  float t = 0.0f, h = 0.0f, p = 0.0f;
 
   for(int i = 0; i < num_reads; ++i){
-    t += HTS.readTemperature();
+    t += HTS.readTemperature()-2; // account for error
     h += HTS.readHumidity();
-    rtos::ThisThread::sleep_for(1s);
+    p += BARO.readPressure();
+    rtos::ThisThread::sleep_for(5s);
   }
 
   t /= (float)num_reads;
   h /= (float)num_reads;
+  p /= (float)num_reads;
 
-  t_quant = t;
-  h_quant = h;
+  t_quant = round(t);
+  h_quant = round(h);
   scale_and_quantize(t_quant, h_quant);
   t_vals[cur_idx] = t_quant;
   h_vals[cur_idx] = h_quant;
@@ -315,14 +327,13 @@ void readPredictSend(){
   cur_idx = (cur_idx + 1) % NUM_HOURS;
   cur_t = t;
   cur_h = h;
+  cur_p = p;
   // dequantize
   pred_f = (pred_int8 - tflu_o_zero_point) * tflu_o_scale;
-  Serial.print("Temperature = ");
-  Serial.println(t);
-  Serial.print("Humidity = ");
-  Serial.println(h);
-  Serial.print(100*pred_f);
-  Serial.println("% chance it will snow");
+  MicroPrintf("Temperature = %d deg. C", (int)t);
+  MicroPrintf("Humidity = %d\%", (int)h);
+  MicroPrintf("Barometric pressure = %d kPa", (int)p);
+  MicroPrintf("%d\% chance it will snow", (int)(100*pred_f));
   mutex.unlock();
   // Critical section end
 }
