@@ -33,7 +33,7 @@ while True:
         for x in range(num_objs):
             data_str = serial_readline(ser)
             xy_str = data_str.split(',')
-            xy = [int(xy_str[0], xy_str[1])
+            xy = [int(xy_str[0], xy_str[1])]
             cv2.circle(img_resized, xy, 4, (0,0,255), -1)
     key = cv2.waitKey(33)
     if key == ord('q'):
