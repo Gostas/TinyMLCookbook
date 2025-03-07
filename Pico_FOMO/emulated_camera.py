@@ -27,14 +27,14 @@ while True:
         img_gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
         data = bytearray(img_gray.astype(np.uint8))
         ser.write(data)
-        cv2.imshow('Captured image', img_resized)
         data_str = serial_readline(ser)
         num_objs = int(data_str)
         for x in range(num_objs):
             data_str = serial_readline(ser)
             xy_str = data_str.split(',')
-            xy = [int(xy_str[0], xy_str[1])]
+            xy = [int(xy_str[0]), int(xy_str[1])]
             cv2.circle(img_resized, xy, 4, (0,0,255), -1)
+        cv2.imshow('Captured image', img_resized)
     key = cv2.waitKey(33)
     if key == ord('q'):
         break
