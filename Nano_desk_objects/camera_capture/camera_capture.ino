@@ -39,6 +39,13 @@ constexpr int PRESSED = 0;
 
 byte data[320 * 240 * 2]; // QVGA: 320x240 X 2 bytes per pixel (RGB565)
 
+void rgb565_rgb888(uint8_t *in, uint8_t *out){
+    uint16_t p = (in[0] << 8) | in[1];
+    out[0] = ((p >> 11) & 0x1f) << 3;
+    out[1] = ((p >> 5) & 0x3f) << 2;
+    out[2] = (p & 0x1f) << 3;
+}
+
 void setup() {
     button.mode(PullUp);
     led = 0;
@@ -53,13 +60,26 @@ void setup() {
     bytes_per_frame = Camera.width() * Camera.height() * Camera.bytesPerPixel();
 
     // Optionally, enable the test pattern for testing
-    // Camera.testPattern();
+    Camera.testPattern();
 }
 
 void loop() {
+    led = !button;
     if(button == PRESSED){
         Camera.readFrame(data);
+        uint8_t rgb888[3];
+        Serial.println("<image>");
+        Serial.println(Camera.width());
+        Serial.println(Camera.height());
+        // int32_t bytes_per_pixel = Camera.bytesPerPixel();
+        // int32_t i = 0;
+        // for(; i < bytes_per_frame; i+= bytes_per_pixel){
+        //     rgb565_rgb888(&data[i], rgb888);
+        //     Serial.println(rgb888[0]);
+        //     Serial.println(rgb888[1]);
+        //     Serial.println(rgb888[2]);
+        // }
         Serial.write(data, bytes_per_frame);
+        Serial.println("</image>");
     }
-    led = !button;
 }
