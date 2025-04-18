@@ -37,7 +37,12 @@ mbed::DigitalIn button(p30);
 mbed::DigitalOut led(p13);
 constexpr int PRESSED = 0;
 
-byte data[320 * 240 * 2]; // QVGA: 320x240 X 2 bytes per pixel (RGB565)
+byte data[160 * 120 * 2]; // QVGA: 320x240 X 2 bytes per pixel (RGB565)
+
+template <typename T>
+inline T clamp_0_255(T x){
+    return std::max(std::min(x, (T)255), (T)0);
+}
 
 void rgb565_rgb888(uint8_t *in, uint8_t *out){
     uint16_t p = (in[0] << 8) | in[1];
@@ -46,13 +51,26 @@ void rgb565_rgb888(uint8_t *in, uint8_t *out){
     out[2] = (p & 0x1f) << 3;
 }
 
+void ycbcr422_rgb888(int32_t Y, int32_t Cb, int32_t Cr, uint8_t *out){
+    Cr -= 128;
+    Cb -= 128;
+    int32_t r, g, b;
+
+    r = Y + Cr + (Cr >> 2) + (Cr >> 3) + (Cr >> 5);
+    g = Y - ((Cb >> 2) + (Cb >> 4) + (Cb >> 5)) - ((Cr >> 1) + (Cr >> 3) + (Cr >> 4));
+    b = Y + Cb + (Cb >> 1) + (Cb >> 2) + (Cb >> 6);
+    out[0] = clamp_0_255(r);
+    out[1] = clamp_0_255(g);
+    out[2] = clamp_0_255(b);
+}
+
 void setup() {
     button.mode(PullUp);
     led = 0;
     Serial.begin(115200);
     while (!Serial);
 
-    if (!Camera.begin(QVGA, RGB565, 1)) {
+    if (!Camera.begin(QQVGA, YUV422, 1)) {
     Serial.println("Failed to initialize camera!");
     while (1);
     }
@@ -66,20 +84,34 @@ void setup() {
 void loop() {
     led = !button;
     if(button == PRESSED){
-        Camera.readFrame(data);
         uint8_t rgb888[3];
+        int32_t step_bytes = Camera.bytesPerPixel() * 2;
+
+        Camera.readFrame(data);
+        
         Serial.println("<image>");
         Serial.println(Camera.width());
         Serial.println(Camera.height());
-        // int32_t bytes_per_pixel = Camera.bytesPerPixel();
-        // int32_t i = 0;
-        // for(; i < bytes_per_frame; i+= bytes_per_pixel){
-        //     rgb565_rgb888(&data[i], rgb888);
-        //     Serial.println(rgb888[0]);
-        //     Serial.println(rgb888[1]);
-        //     Serial.println(rgb888[2]);
-        // }
-        Serial.write(data, bytes_per_frame);
+
+        for(int32_t i = 0; i < bytes_per_frame; i+= step_bytes){
+            const int32_t Y0 = data[i];
+            const int32_t Cr = data[i+1];
+            const int32_t Y1 = data[i+2];
+            const int32_t Cb = data[i+3];
+
+            ycbcr422_rgb888(Y0, Cb, Cr, rgb888);
+
+            Serial.println(rgb888[0]);
+            Serial.println(rgb888[1]);
+            Serial.println(rgb888[2]);
+
+            ycbcr422_rgb888(Y1, Cb, Cr, rgb888);
+
+            Serial.println(rgb888[0]);
+            Serial.println(rgb888[1]);
+            Serial.println(rgb888[2]);
+        }
+        //Serial.write(data, bytes_per_frame);
         Serial.println("</image>");
     }
 }
