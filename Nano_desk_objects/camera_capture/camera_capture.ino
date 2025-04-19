@@ -70,7 +70,7 @@ void setup() {
     Serial.begin(115200);
     while (!Serial);
 
-    if (!Camera.begin(QQVGA, YUV422, 1)) {
+    if (!Camera.begin(QQVGA, RGB565, 1)) {
     Serial.println("Failed to initialize camera!");
     while (1);
     }
@@ -78,7 +78,7 @@ void setup() {
     bytes_per_frame = Camera.width() * Camera.height() * Camera.bytesPerPixel();
 
     // Optionally, enable the test pattern for testing
-    Camera.testPattern();
+    //Camera.testPattern();
 }
 
 void loop() {
@@ -93,25 +93,25 @@ void loop() {
         Serial.println(Camera.width());
         Serial.println(Camera.height());
 
-        for(int32_t i = 0; i < bytes_per_frame; i+= step_bytes){
-            const int32_t Y0 = data[i];
-            const int32_t Cr = data[i+1];
-            const int32_t Y1 = data[i+2];
-            const int32_t Cb = data[i+3];
+        // for(int32_t i = 0; i < bytes_per_frame; i+= step_bytes){
+        //     const int32_t Y0 = data[i];
+        //     const int32_t Cr = data[i+1];
+        //     const int32_t Y1 = data[i+2];
+        //     const int32_t Cb = data[i+3];
 
-            ycbcr422_rgb888(Y0, Cb, Cr, rgb888);
+        //     ycbcr422_rgb888(Y0, Cb, Cr, rgb888);
 
-            Serial.println(rgb888[0]);
-            Serial.println(rgb888[1]);
-            Serial.println(rgb888[2]);
+        //     Serial.println(rgb888[0]);
+        //     Serial.println(rgb888[1]);
+        //     Serial.println(rgb888[2]);
 
-            ycbcr422_rgb888(Y1, Cb, Cr, rgb888);
+        //     ycbcr422_rgb888(Y1, Cb, Cr, rgb888);
 
-            Serial.println(rgb888[0]);
-            Serial.println(rgb888[1]);
-            Serial.println(rgb888[2]);
-        }
-        //Serial.write(data, bytes_per_frame);
+        //     Serial.println(rgb888[0]);
+        //     Serial.println(rgb888[1]);
+        //     Serial.println(rgb888[2]);
+        // }
+        Serial.write(data, bytes_per_frame);
         Serial.println("</image>");
     }
 }
