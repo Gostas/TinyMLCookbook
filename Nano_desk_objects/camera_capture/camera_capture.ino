@@ -84,8 +84,8 @@ void setup() {
 void loop() {
     led = !button;
     if(button == PRESSED){
-        uint8_t rgb888[3];
-        int32_t step_bytes = Camera.bytesPerPixel() * 2;
+        //uint8_t rgb888[3];
+        //int32_t step_bytes = Camera.bytesPerPixel() * 2;
 
         Camera.readFrame(data);
         
