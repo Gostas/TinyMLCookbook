@@ -172,11 +172,8 @@ void loop() {
     //Serial.write(frame, height_o*width_o*3);
     tflu_interpreter->Invoke();
     const char *label[] = {"book", "mug", "unknown"};
-    MicroPrintf("\n%s | %s  | %s", label[0], label[1], label[2]);
-    Serial.print(tflu_o_tensor->data.f[0]);
-    Serial.print(" | ");
-    Serial.print(tflu_o_tensor->data.f[1]);
-    Serial.print(" | ");
-    Serial.println(tflu_o_tensor->data.f[2]);
+    MicroPrintf("%s | %s  | %s", label[0], label[1], label[2]);
+    MicroPrintf("%.2f | %.2f | %.2f\n",tflu_o_tensor->data.f[0], tflu_o_tensor->data.f[1],
+                tflu_o_tensor->data.f[2]);
     //Serial.println("</image>");    
 }
